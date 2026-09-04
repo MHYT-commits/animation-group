@@ -1,0 +1,6 @@
+* text=auto eol=lf
+
+# Asset Library downloads only need the addon directory.
+/** export-ignore
+/addons !export-ignore
+/addons/** !export-ignore
