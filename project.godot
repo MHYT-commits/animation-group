@@ -1,0 +1,10 @@
+; Minimal project used to validate the addon in Godot.
+; The addon is not enabled automatically for projects that copy it.
+config_version=5
+
+[application]
+config/name="Animation Group"
+
+[rendering]
+renderer/rendering_method="gl_compatibility"
+renderer/rendering_method.mobile="gl_compatibility"
