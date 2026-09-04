@@ -1,36 +1,67 @@
-# Animation Group Manual
+# Animation Group
 
-A portable Godot editor addon for organizing nodes in the built-in `AnimationNodeBlendTree` editor.
+Organize an `AnimationNodeBlendTree` with colorful frames and collapsible groups.
 
-This package is intentionally manual-only. It does not inspect project scripts, infer groups from node names, seed groups on startup, or provide an Auto-group command.
+This version is made for general Godot projects. It only creates groups when you
+ask it to. It does not scan your project or try to guess how your nodes should
+be organized.
 
 ## Install
 
-Copy `addons/animation_group_manual` into a Godot project, then enable **Animation Group Manual** in **Project > Project Settings > Plugins**.
+1. Open **Project > Project Settings > Plugins**.
+2. Enable **Animation Group Manual**.
+3. Open a saved `AnimationTree` that contains an `AnimationNodeBlendTree`.
 
-The addon integrates with Godot's internal AnimationTree editor control hierarchy. It is designed for Godot 4.7 and may need an update if that internal hierarchy changes.
+The addon adds a few buttons to the blend tree editor's toolbar.
 
-## Workflow
+## Use groups
 
-Open a saved `AnimationTree` containing an `AnimationNodeBlendTree`. Select graph nodes, then use the toolbar to create and edit groups manually. Groups can be nested, renamed, tinted, tidied, moved, collapsed, and expanded.
+Select one or more nodes and choose **Group**. You can then:
 
-Group metadata is stored beside the blend tree:
+- Rename the group and choose its color.
+- Move the group by dragging its title bar.
+- Choose **Tidy** to arrange its nodes.
+- Put groups inside other groups.
+- Collapse a group with the arrow in its title bar.
+- Expand it again whenever you need to edit the nodes inside.
+- Use **Ungroup** to remove the frame without removing the nodes.
+
+Click a group's title bar to select the group. This lets you rename, tidy, move,
+or group it with another group. You can hold Ctrl or Shift to select more than
+one group.
+
+## Where your groups are saved
+
+Groups are saved in a small file beside the blend tree:
 
 ```text
 res://path/my_tree.tres
 res://path/my_tree.groups.tres
 ```
 
-The addon stores group metadata separately from animation playback data. It does not change animation connections or playback behavior.
+The group file is separate from the animation resource. The addon does not
+change animation connections or playback behavior.
 
-## Saved resources
+The blend tree must be saved before grouping commands can be used. Unsaved or
+embedded trees can still be viewed, but their group-editing buttons stay
+disabled until Godot can give the tree its own save path.
 
-Grouping commands require a saved blend-tree resource with a sidecar path. Unsaved or embedded blend trees remain visible, but persistence commands are disabled until the resource can be saved independently.
+## Collapsed groups
 
-## Limitations
+When a group is collapsed, the addon redraws any connections that cross its
+boundary so the graph remains easy to follow. Connections entirely inside the
+group are hidden until you expand it again. These connections are visual only;
+the underlying animation tree is unchanged.
 
-- Membership uses animation node names. Renaming a node removes its stale membership on the next refresh.
-- Synthetic frames remain non-selectable by GraphEdit so Godot's delete handler cannot treat them as animation nodes.
-- Collapsed crossing wires are drawn by the addon and are not draggable until the group is expanded.
-- The addon supports the built-in blend-tree editor integration; it does not add frames to arbitrary custom graph controls.
-- There is no automatic grouping in this package. Projects that need seeding should use their own separate integration.
+## Notes
+
+- Node membership follows node names. Renaming a node removes its old membership
+	the next time the graph refreshes.
+- Group frames cannot be selected by Godot's normal delete tool. This prevents
+	Godot from treating a visual frame as an animation node.
+- Connections around collapsed groups cannot be dragged. Expand the group first
+	when you need to rewire something.
+- The addon works with Godot's built-in blend tree editor. It does not add frames
+	to custom graph controls or the state machine editor.
+- This package has no automatic grouping. Projects that need custom automation
+	can add their own separate tool.
