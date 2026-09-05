@@ -190,11 +190,9 @@ func set_animation_tree(tree: AnimationTree) -> void:
 ## node position change.
 func refresh_positions() -> void:
 	if _ensure_editor():
-		_queue_apply(true)
 		# UndoRedo changes the blend-tree resource before GraphEdit has finished
-		# rebuilding its visual nodes and connection cache. A second pass on the
-		# next frame prevents collapsed wires from being restored against that
-		# transient state.
+		# rebuilding its visual nodes and connection cache. Do not apply during
+		# that transient state; the next-frame pass is the authoritative refresh.
 		_refresh_positions_next_frame.call_deferred()
 
 
