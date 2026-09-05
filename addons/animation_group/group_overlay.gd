@@ -115,6 +115,7 @@ var _warned_editor := false
 var _warned_tree := false
 var _drag_additive := false
 var _graph_background := GRAPH_BG_FALLBACK
+var _editor_suspended := false
 
 ## Groups picked by clicking their title bars. Ids, never the resources: a
 ## reloaded sidecar hands out new BlendTreeGroup objects, and this outlives one.
@@ -142,6 +143,7 @@ var _planned_wires: Array = []
 
 func setup(plugin: EditorPlugin) -> void:
 	_plugin = plugin
+	_editor_suspended = false
 	_toolbar = TOOLBAR.new()
 	_toolbar.command.connect(_on_command)
 	_dialog = DIALOG.new()
@@ -151,6 +153,7 @@ func setup(plugin: EditorPlugin) -> void:
 
 
 func teardown() -> void:
+	_editor_suspended = true
 	_cancel_drag()
 	_disconnect_signals()
 	_clear_frames()
@@ -172,6 +175,31 @@ func teardown() -> void:
 	_blend_tree = null
 	_data = null
 	_animation_tree = null
+
+
+func suspend_editor() -> void:
+	if _editor_suspended:
+		return
+	_editor_suspended = true
+	_cancel_drag()
+	_disconnect_signals()
+	_clear_frames()
+	_restore_all_hidden()
+	_restore_connections()
+	_release_wire_layer()
+	if _toolbar != null:
+		_toolbar.remove()
+	_selected_group_ids.clear()
+	_editing_group_id = ""
+	_editor = null
+	_graph = null
+	_planned_wires.clear()
+
+
+func resume_editor() -> void:
+	_editor_suspended = false
+	if _ensure_editor():
+		_queue_apply()
 
 
 ## The AnimationTree the inspector is on. Never cleared: the bottom panel keeps
@@ -200,18 +228,19 @@ func _refresh_positions_next_frame() -> void:
 	if _plugin == null or not is_instance_valid(_plugin.get_tree()):
 		return
 	await _plugin.get_tree().process_frame
-	if _ensure_editor():
+	if not _editor_suspended and _ensure_editor():
 		_queue_apply(true)
 
 
 func notify_visible() -> void:
-	if _ensure_editor():
-		_queue_apply()
+	resume_editor()
 
 
 #region Editor wiring
 
 func _ensure_editor() -> bool:
+	if _editor_suspended:
+		return false
 	if is_instance_valid(_editor) and is_instance_valid(_graph):
 		return true
 

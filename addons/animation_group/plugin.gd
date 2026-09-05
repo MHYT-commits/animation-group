@@ -39,8 +39,12 @@ func _edit(object: Object) -> void:
 
 
 func _make_visible(visible: bool) -> void:
-	if visible and _overlay != null:
-		_overlay.notify_visible()
+	if _overlay == null:
+		return
+	if visible:
+		_overlay.resume_editor()
+	else:
+		_overlay.suspend_editor()
 
 
 ## Called by the tidy undo action so the graph follows the resource.
