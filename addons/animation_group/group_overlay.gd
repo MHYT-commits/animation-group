@@ -368,10 +368,10 @@ func _apply() -> void:
 func _rebuild() -> void:
 	if not _ensure_editor():
 		return
-    var projection := _projection_fingerprint_for_graph()
-    if not _projection_fingerprint.is_empty() and projection != _projection_fingerprint:
-	    _reset_projection()
-	    _projection_fingerprint = projection
+	var projection := _projection_fingerprint_for_graph()
+	if not _projection_fingerprint.is_empty() and projection != _projection_fingerprint:
+		_reset_projection()
+	_projection_fingerprint = projection
 	if not _resolve_blend_tree():
 		_update_buttons()
 		return
@@ -859,20 +859,20 @@ func _sync_node_positions() -> void:
 ## connect_node and disconnect_node to scripts, not a query. So the GraphEdit's
 ## own list is the source, and _suppressed is the part of it we are holding.
 func _all_connections() -> Array:
-    var by_key := {}
+	var by_key := {}
 	if not is_instance_valid(_graph):
-	    return []
-    for connection in _graph.get_connection_list():
-	    by_key[_connection_key(connection)] = connection
+		return []
+	for connection in _graph.get_connection_list():
+		by_key[_connection_key(connection)] = connection
 	for key in _suppressed:
-	    by_key[_connection_key(_suppressed[key])] = _suppressed[key]
-    var keys := PackedStringArray()
-    for key in by_key:
-	    keys.append(String(key))
-    keys.sort()
-    var found: Array = []
-    for key in keys:
-	    found.append(by_key[key])
+		by_key[_connection_key(_suppressed[key])] = _suppressed[key]
+	var keys := PackedStringArray()
+	for key in by_key:
+		keys.append(String(key))
+	keys.sort()
+	var found: Array = []
+	for key in keys:
+		found.append(by_key[key])
 	return found
 
 
@@ -883,36 +883,36 @@ func _connection_key(connection: Dictionary) -> String:
 
 
 func _projection_fingerprint_for_graph() -> String:
-    if not is_instance_valid(_graph):
-	    return ""
-    var nodes := PackedStringArray()
-    for child in _graph.get_children():
-	    if child is GraphNode:
-		    nodes.append("%d:%s" % [child.get_instance_id(), String(child.name)])
-    nodes.sort()
-    var connections := PackedStringArray()
-    for connection in _all_connections():
-	    connections.append(_connection_key(connection))
-    connections.sort()
-    return "%d|%s|%s" % [_graph.get_instance_id(), "|".join(nodes), "|".join(connections)]
+	if not is_instance_valid(_graph):
+		return ""
+	var nodes := PackedStringArray()
+	for child in _graph.get_children():
+		if child is GraphNode:
+			nodes.append("%d:%s" % [child.get_instance_id(), String(child.name)])
+	nodes.sort()
+	var connections := PackedStringArray()
+	for connection in _all_connections():
+		connections.append(_connection_key(connection))
+	connections.sort()
+	return "%d|%s|%s" % [_graph.get_instance_id(), "|".join(nodes), "|".join(connections)]
 
 
 func _reset_projection() -> void:
-    _cancel_drag()
-    _clear_frames(false)
-    _restore_all_hidden(false)
-    _restore_connections()
-    _release_wire_layer()
-    _planned_wires.clear()
-    _suppressed.clear()
-    _index.clear()
-    _selected_group_ids.clear()
-    _editing_group_id = ""
-    _blend_tree = null
-    _data = null
-    _sidecar_path = ""
-    _tree_key = ""
-    _resolved_change_serial = -1
+	_cancel_drag()
+	_clear_frames(false)
+	_restore_all_hidden(false)
+	_restore_connections()
+	_release_wire_layer()
+	_planned_wires.clear()
+	_suppressed.clear()
+	_index.clear()
+	_selected_group_ids.clear()
+	_editing_group_id = ""
+	_blend_tree = null
+	_data = null
+	_sidecar_path = ""
+	_tree_key = ""
+	_resolved_change_serial = -1
 
 
 ## Take the wires of a collapsed group out of the GraphEdit, and put them back
@@ -1239,27 +1239,27 @@ func _resolve_blend_tree() -> bool:
 	# The graph almost always still shows the tree it showed last apply, and
 	# _candidate_trees walks and allocates over every nested tree in the scene.
 	# Confirming the incumbent is a dictionary lookup per node.
-	    if _blend_tree != null and is_instance_valid(_blend_tree) and _data != null \
-			    and _resolved_change_serial == _graph_change_serial \
+	if _blend_tree != null and is_instance_valid(_blend_tree) and _data != null \
+			and _resolved_change_serial == _graph_change_serial \
 			and _names_match(_blend_tree, visible):
-		    _resolved_change_serial = _graph_change_serial
+		_resolved_change_serial = _graph_change_serial
 		return true
 
-	    var matches: Array = []
+	var matches: Array = []
 	for entry in _candidate_trees():
 		var tree: AnimationNodeBlendTree = entry[1]
 		if _names_match(tree, visible):
-			    matches.append(entry)
-	    if matches.size() == 1:
-		    _adopt(matches[0][1], String(matches[0][0]))
-		    _resolved_change_serial = _graph_change_serial
-		    return true
-	    if matches.size() > 1:
-		    if not _warned_tree:
-			    _warned_tree = true
-			    push_warning("Animation Group: multiple blend trees match the visible nodes after an editor view change; "
-				    + "groups were reset until the view becomes identifiable.")
-		    return false
+			matches.append(entry)
+	if matches.size() == 1:
+		_adopt(matches[0][1], String(matches[0][0]))
+		_resolved_change_serial = _graph_change_serial
+		return true
+	if matches.size() > 1:
+		if not _warned_tree:
+			_warned_tree = true
+			push_warning("Animation Group: multiple blend trees match the visible nodes after an editor view change; "
+				+ "groups were reset until the view becomes identifiable.")
+		return false
 
 	if not _warned_tree:
 		_warned_tree = true
