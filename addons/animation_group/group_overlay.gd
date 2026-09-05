@@ -97,6 +97,9 @@ var _tree_key := ""
 var _applying := false
 var _apply_queued := false
 var _sync_positions := false
+var _projection_fingerprint := ""
+var _graph_change_serial := 0
+var _resolved_change_serial := -1
 var _save_queued := false
 var _dragging := false
 var _apply_after_drag := false
@@ -175,6 +178,9 @@ func teardown() -> void:
 	_blend_tree = null
 	_data = null
 	_animation_tree = null
+	_projection_fingerprint = ""
+	_graph_change_serial = 0
+	_resolved_change_serial = -1
 
 
 func suspend_editor() -> void:
@@ -194,6 +200,8 @@ func suspend_editor() -> void:
 	_editor = null
 	_graph = null
 	_planned_wires.clear()
+	_projection_fingerprint = ""
+	_resolved_change_serial = -1
 
 
 func resume_editor() -> void:
@@ -281,6 +289,7 @@ func _disconnect_signals() -> void:
 
 
 func _on_graph_changed() -> void:
+	_graph_change_serial += 1
 	_queue_apply()
 
 
@@ -359,6 +368,10 @@ func _apply() -> void:
 func _rebuild() -> void:
 	if not _ensure_editor():
 		return
+    var projection := _projection_fingerprint_for_graph()
+    if not _projection_fingerprint.is_empty() and projection != _projection_fingerprint:
+	    _reset_projection()
+	    _projection_fingerprint = projection
 	if not _resolve_blend_tree():
 		_update_buttons()
 		return
@@ -766,7 +779,7 @@ func _apply_members(frame: GraphFrame, frame_name: String, group: BlendTreeGroup
 		_repair_ports(node)
 
 
-func _release_frame(frame: GraphFrame) -> void:
+func _release_frame(frame: GraphFrame, restore_positions: bool = true) -> void:
 	if not is_instance_valid(frame) or not is_instance_valid(_graph):
 		return
 	# A frame the gesture is holding is about to stop existing.
@@ -777,7 +790,7 @@ func _release_frame(frame: GraphFrame) -> void:
 		_graph.detach_graph_element_from_frame(frame.name)
 	if _graph.has_method("get_attached_nodes_of_frame"):
 		for attached in _graph.get_attached_nodes_of_frame(frame.name):
-			_restore_element(String(attached))
+			_restore_element(String(attached), restore_positions)
 			_graph.detach_graph_element_from_frame(StringName(attached))
 	_graph.remove_child(frame)
 	frame.queue_free()
@@ -787,12 +800,12 @@ func _release_frame(frame: GraphFrame) -> void:
 ## Every element the overlay has hidden, back where the built-in editor expects
 ## it. A collapsed frame detaches its members, so releasing frames is not enough
 ## to find them all again -- the graph itself is the only complete list.
-func _restore_all_hidden() -> void:
+func _restore_all_hidden(restore_positions: bool = true) -> void:
 	if not is_instance_valid(_graph):
 		return
 	for child in _graph.get_children():
 		if child is GraphElement and not child.visible:
-			_restore_element(String(child.name))
+			_restore_element(String(child.name), restore_positions)
 
 
 ## it: visible, and where the resource says it is.
@@ -800,14 +813,14 @@ func _restore_all_hidden() -> void:
 ## Disabling the addon while a group is collapsed would otherwise leave those
 ## animation nodes invisible and stacked on one another in the built-in editor,
 ## with no addon left to undo it.
-func _restore_element(element_name: String) -> void:
+func _restore_element(element_name: String, restore_position: bool = true) -> void:
 	var element := _graph.get_node_or_null(NodePath(element_name)) as GraphElement
 	if element == null:
 		return
 	if not element.visible:
 		element.visible = true
 	var node := element as GraphNode
-	if node == null or _blend_tree == null or not _blend_tree.has_node(StringName(element_name)):
+	if not restore_position or node == null or _blend_tree == null or not _blend_tree.has_node(StringName(element_name)):
 		return
 	_repair_ports(node)
 	var home := _blend_tree.get_node_position(StringName(element_name)) \
@@ -817,12 +830,12 @@ func _restore_element(element_name: String) -> void:
 
 
 ## Every frame this addon has ever added to the graph, bookkeeping or not.
-func _clear_frames() -> void:
+func _clear_frames(restore_positions: bool = true) -> void:
 	if not is_instance_valid(_graph):
 		return
 	for child in _graph.get_children():
 		if child is GraphFrame and String(child.name).begins_with(FRAME_PREFIX):
-			_release_frame(child)
+			_release_frame(child, restore_positions)
 
 
 func _sync_node_positions() -> void:
@@ -846,12 +859,20 @@ func _sync_node_positions() -> void:
 ## connect_node and disconnect_node to scripts, not a query. So the GraphEdit's
 ## own list is the source, and _suppressed is the part of it we are holding.
 func _all_connections() -> Array:
-	var found: Array = []
+    var by_key := {}
 	if not is_instance_valid(_graph):
-		return found
-	found.append_array(_graph.get_connection_list())
+	    return []
+    for connection in _graph.get_connection_list():
+	    by_key[_connection_key(connection)] = connection
 	for key in _suppressed:
-		found.append(_suppressed[key])
+	    by_key[_connection_key(_suppressed[key])] = _suppressed[key]
+    var keys := PackedStringArray()
+    for key in by_key:
+	    keys.append(String(key))
+    keys.sort()
+    var found: Array = []
+    for key in keys:
+	    found.append(by_key[key])
 	return found
 
 
@@ -859,6 +880,39 @@ func _connection_key(connection: Dictionary) -> String:
 	return "%s:%d>%s:%d" % [
 		connection.get("from_node", ""), int(connection.get("from_port", 0)),
 		connection.get("to_node", ""), int(connection.get("to_port", 0))]
+
+
+func _projection_fingerprint_for_graph() -> String:
+    if not is_instance_valid(_graph):
+	    return ""
+    var nodes := PackedStringArray()
+    for child in _graph.get_children():
+	    if child is GraphNode:
+		    nodes.append("%d:%s" % [child.get_instance_id(), String(child.name)])
+    nodes.sort()
+    var connections := PackedStringArray()
+    for connection in _all_connections():
+	    connections.append(_connection_key(connection))
+    connections.sort()
+    return "%d|%s|%s" % [_graph.get_instance_id(), "|".join(nodes), "|".join(connections)]
+
+
+func _reset_projection() -> void:
+    _cancel_drag()
+    _clear_frames(false)
+    _restore_all_hidden(false)
+    _restore_connections()
+    _release_wire_layer()
+    _planned_wires.clear()
+    _suppressed.clear()
+    _index.clear()
+    _selected_group_ids.clear()
+    _editing_group_id = ""
+    _blend_tree = null
+    _data = null
+    _sidecar_path = ""
+    _tree_key = ""
+    _resolved_change_serial = -1
 
 
 ## Take the wires of a collapsed group out of the GraphEdit, and put them back
@@ -1185,15 +1239,27 @@ func _resolve_blend_tree() -> bool:
 	# The graph almost always still shows the tree it showed last apply, and
 	# _candidate_trees walks and allocates over every nested tree in the scene.
 	# Confirming the incumbent is a dictionary lookup per node.
-	if _blend_tree != null and is_instance_valid(_blend_tree) and _data != null \
+	    if _blend_tree != null and is_instance_valid(_blend_tree) and _data != null \
+			    and _resolved_change_serial == _graph_change_serial \
 			and _names_match(_blend_tree, visible):
+		    _resolved_change_serial = _graph_change_serial
 		return true
 
+	    var matches: Array = []
 	for entry in _candidate_trees():
 		var tree: AnimationNodeBlendTree = entry[1]
 		if _names_match(tree, visible):
-			_adopt(tree, String(entry[0]))
-			return true
+			    matches.append(entry)
+	    if matches.size() == 1:
+		    _adopt(matches[0][1], String(matches[0][0]))
+		    _resolved_change_serial = _graph_change_serial
+		    return true
+	    if matches.size() > 1:
+		    if not _warned_tree:
+			    _warned_tree = true
+			    push_warning("Animation Group: multiple blend trees match the visible nodes after an editor view change; "
+				    + "groups were reset until the view becomes identifiable.")
+		    return false
 
 	if not _warned_tree:
 		_warned_tree = true
