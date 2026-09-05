@@ -191,6 +191,19 @@ func set_animation_tree(tree: AnimationTree) -> void:
 func refresh_positions() -> void:
 	if _ensure_editor():
 		_queue_apply(true)
+		# UndoRedo changes the blend-tree resource before GraphEdit has finished
+		# rebuilding its visual nodes and connection cache. A second pass on the
+		# next frame prevents collapsed wires from being restored against that
+		# transient state.
+		_refresh_positions_next_frame.call_deferred()
+
+
+func _refresh_positions_next_frame() -> void:
+	if _plugin == null or not is_instance_valid(_plugin.get_tree()):
+		return
+	await _plugin.get_tree().process_frame
+	if _ensure_editor():
+		_queue_apply(true)
 
 
 func notify_visible() -> void:
