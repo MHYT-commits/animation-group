@@ -328,6 +328,29 @@ func add_group(group: BlendTreeGroup) -> void:
 	_drop_empty()
 
 
+## Replace direct membership without replacing the group's identity or children.
+## Unchecked members become ungrouped; checked nodes move from their old group.
+## Descendant members stay in their nested groups.
+func set_members(group: BlendTreeGroup, names: PackedStringArray) -> bool:
+	if group == null or not groups.has(group):
+		return false
+	var nested := PackedStringArray()
+	for child in descendants_of(group):
+		nested.append_array(child.members)
+	var wanted := PackedStringArray()
+	for node_name in names:
+		if node_name != "output" and not node_name.is_empty() \
+				and not nested.has(node_name) and not wanted.has(node_name):
+			wanted.append(node_name)
+	if wanted == group.members:
+		return false
+	group.members = wanted
+	for member in wanted:
+		_strip_member(group.tree_key, member, group)
+	_drop_empty()
+	return true
+
+
 ## Ungroup, and the exact inverse of the implicit nest that made it: an inner
 ## group's members go back to the group that held it, and its own children move
 ## up a level. A top-level group's members simply become ungrouped.

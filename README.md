@@ -2,7 +2,7 @@
 
 A Godot editor addon for organizing `AnimationNodeBlendTree` graphs with colorful, collapsible groups.
 
-Animation Group is manual-only. It does not inspect project scripts, guess groups from node names, or create groups automatically.
+Group creation is manual-only. Nodes created while one group is picked automatically join it. It does not inspect project scripts, guess groups from node names, or create groups automatically.
 
 ## Install in a Godot project
 
@@ -12,10 +12,13 @@ Open a saved `AnimationTree` containing an `AnimationNodeBlendTree`. The addon a
 
 ## Features
 
-- Group selected animation nodes.
+- Group any blend-tree node type, including clips, OneShot, Blend2, and BlendSpaces.
+- Automatically include nodes created while a single group is picked.
 - Nest groups inside other groups.
 - Rename groups and choose their colors.
-- Move groups by dragging their title bars.
+- Add or remove existing clip nodes with a searchable **Members** editor.
+- Box-select groups by left-dragging across their title bars.
+- Move selected groups together by dragging a title bar, with undo/redo.
 - Arrange group contents with **Tidy**.
 - Collapse and expand groups.
 - Draw collapsed-group connections clearly.

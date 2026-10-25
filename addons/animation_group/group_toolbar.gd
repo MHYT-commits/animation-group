@@ -16,6 +16,8 @@ const MANUAL_BUTTONS := [
 		"tip": "Delete the picked group, or the one holding the selected nodes, merging them back into the group around it. The nodes stay."},
 	{"id": &"edit", "text": "Rename", "icon": "Edit",
 		"tip": "Rename a group and pick its tint. Click a group's title bar to pick it, or select any node inside it."},
+	{"id": &"members", "text": "Members", "icon": "Animation",
+		"tip": "Add or remove any blend-tree node: Animation, OneShot, Blend2, BlendSpace, and more. New nodes automatically join the single picked group."},
 	{"id": &"tidy", "text": "Tidy", "icon": "AnimationTrackList",
 		"tip": "Line the group's nodes up, in transition input order where there is one."},
 ]

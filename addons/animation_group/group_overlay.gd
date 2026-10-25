@@ -1,7 +1,7 @@
 @tool
 extends RefCounted
 
-## Draws the groups into Godot's built-in blend tree editor, and runs the five
+## Draws the groups into Godot's built-in blend tree editor, and runs the
 ## toolbar commands.
 ##
 ## The whole overlay is decoration: it adds GraphFrames to the editor's GraphEdit
@@ -14,6 +14,7 @@ const LOCATOR := preload("res://addons/animation_group/editor_locator.gd")
 const LAYOUT := preload("res://addons/animation_group/group_layout.gd")
 const TOOLBAR := preload("res://addons/animation_group/group_toolbar.gd")
 const DIALOG := preload("res://addons/animation_group/group_edit_dialog.gd")
+const MEMBERS_DIALOG := preload("res://addons/animation_group/group_members_dialog.gd")
 
 ## Frame node names. Prefixed so a teardown after a script reload can still find
 ## every frame this addon ever added, with or without its bookkeeping.
@@ -87,6 +88,10 @@ var _editor: Control
 var _graph: GraphEdit
 var _toolbar
 var _dialog
+var _members_dialog
+var _members_group_id := ""
+var _members_tree: AnimationNodeBlendTree
+var _members_data: BlendTreeGroupData
 
 var _animation_tree: AnimationTree
 var _blend_tree: AnimationNodeBlendTree
@@ -100,6 +105,14 @@ var _sync_positions := false
 var _projection_fingerprint := ""
 var _graph_change_serial := 0
 var _resolved_change_serial := -1
+## Observe the resource, not GraphNode instances: Godot recreates those even
+## when only a connection changed. Names plus resource ids distinguish a newly
+## added node from a redraw or a rename, for every AnimationNode subtype.
+var _watched_tree: AnimationNodeBlendTree
+var _known_nodes := {}
+var _auto_memberships := {}
+var _pending_group_id := ""
+var _pending_group_retries := 0
 var _save_queued := false
 var _dragging := false
 var _apply_after_drag := false
@@ -129,6 +142,14 @@ var _editor_suspended := false
 ## handler's remove_node(). Selection is modelled here instead.
 var _selected_group_ids := PackedStringArray()
 
+## Observe GraphEdit's native marquee; frames remain non-selectable by Godot.
+var _box_active := false
+var _box_origin := Vector2.ZERO
+var _box_to := Vector2.ZERO
+var _box_additive := false
+var _box_previous := PackedStringArray()
+var _box_serial := 0
+
 ## The group the rename dialog was opened for, held across its modal life.
 var _editing_group_id := ""
 
@@ -151,12 +172,16 @@ func setup(plugin: EditorPlugin) -> void:
 	_toolbar.command.connect(_on_command)
 	_dialog = DIALOG.new()
 	_dialog.applied.connect(_on_edit_applied)
+	_members_dialog = MEMBERS_DIALOG.new()
+	_members_dialog.applied.connect(_on_members_applied)
 	_ensure_editor()
 	_queue_apply()
 
 
 func teardown() -> void:
 	_editor_suspended = true
+	_stop_watching_tree()
+	_reset_box_selection()
 	_cancel_drag()
 	_disconnect_signals()
 	_clear_frames()
@@ -169,6 +194,10 @@ func teardown() -> void:
 		_toolbar.remove()
 	if _dialog != null:
 		_dialog.teardown()
+	if _members_dialog != null:
+		_members_dialog.teardown()
+	_clear_members_target()
+	_members_dialog = null
 	_selected_group_ids.clear()
 	_editing_group_id = ""
 	_toolbar = null
@@ -187,6 +216,8 @@ func suspend_editor() -> void:
 	if _editor_suspended:
 		return
 	_editor_suspended = true
+	_stop_watching_tree()
+	_reset_box_selection()
 	_cancel_drag()
 	_disconnect_signals()
 	_clear_frames()
@@ -215,6 +246,8 @@ func resume_editor() -> void:
 func set_animation_tree(tree: AnimationTree) -> void:
 	if tree == null:
 		return
+	if tree != _animation_tree:
+		_stop_watching_tree()
 	_animation_tree = tree
 	if _ensure_editor():
 		_queue_apply()
@@ -269,12 +302,15 @@ func _ensure_editor() -> bool:
 	_graph.node_deselected.connect(_on_selection_changed)
 	_editor.visibility_changed.connect(_on_graph_changed)
 	_graph.frame_rect_changed.connect(_on_frame_rect_changed)
+	_graph.gui_input.connect(_on_graph_input)
 	_toolbar.inject(_graph)
 	return true
 
 
 func _disconnect_signals() -> void:
 	if is_instance_valid(_graph):
+		if _graph.gui_input.is_connected(_on_graph_input):
+			_graph.gui_input.disconnect(_on_graph_input)
 		if _graph.child_order_changed.is_connected(_on_graph_changed):
 			_graph.child_order_changed.disconnect(_on_graph_changed)
 		if _graph.node_selected.is_connected(_on_selection_changed):
@@ -298,6 +334,8 @@ func _on_graph_changed() -> void:
 ## _apply_members both deselect nodes, and clearing on their echo would undo the
 ## very selection that caused it.
 func _on_selection_changed(_node: Node = null) -> void:
+	if _box_active or not _pending_group_id.is_empty():
+		return
 	if not _selected_group_ids.is_empty() and not _selected_names().is_empty():
 		_clear_group_selection()
 	_update_buttons()
@@ -368,13 +406,32 @@ func _apply() -> void:
 func _rebuild() -> void:
 	if not _ensure_editor():
 		return
+	# Resource additions can arrive a frame before their editor GraphNodes.
+	# Give the native rebuild time to finish before treating that as navigation.
+	if _pending_group_retries > 0 and _watched_tree == _blend_tree \
+			and not _names_match(_blend_tree, _visible_node_names()):
+		_pending_group_retries -= 1
+		_refresh_positions_next_frame.call_deferred()
+		return
 	var projection := _projection_fingerprint_for_graph()
 	if not _projection_fingerprint.is_empty() and projection != _projection_fingerprint:
-		_reset_projection()
+		# Node creation and native redraws replace GraphNodes in the same tree.
+		# Resolve first so only an actual view change drops the picked group.
+		var previous_tree := _blend_tree
+		var same_tree := _resolve_blend_tree() and _blend_tree == previous_tree
+		_reset_projection(same_tree)
 	_projection_fingerprint = projection
 	if not _resolve_blend_tree():
 		_update_buttons()
 		return
+	_watch_blend_tree()
+	if not _pending_group_id.is_empty():
+		var target := _data.group_with_id(_pending_group_id)
+		if target != null and target.tree_key == _tree_key:
+			_selected_group_ids = PackedStringArray([target.id])
+			_deselect_nodes()
+		_pending_group_id = ""
+		_pending_group_retries = 0
 	_graph_background = _graph_background_colour()
 
 	# Names the tree no longer has are dropped from the groups in memory. The
@@ -791,7 +848,10 @@ func _release_frame(frame: GraphFrame, restore_positions: bool = true) -> void:
 	if _graph.has_method("get_attached_nodes_of_frame"):
 		for attached in _graph.get_attached_nodes_of_frame(frame.name):
 			_restore_element(String(attached), restore_positions)
-			_graph.detach_graph_element_from_frame(StringName(attached))
+			# A rename/rebuild can leave a stale attachment until this frame is
+			# released. GraphEdit errors if asked to detach a missing element.
+			if _graph.get_node_or_null(NodePath(String(attached))) is GraphElement:
+				_graph.detach_graph_element_from_frame(StringName(attached))
 	_graph.remove_child(frame)
 	frame.queue_free()
 
@@ -897,7 +957,8 @@ func _projection_fingerprint_for_graph() -> String:
 	return "%d|%s|%s" % [_graph.get_instance_id(), "|".join(nodes), "|".join(connections)]
 
 
-func _reset_projection() -> void:
+func _reset_projection(preserve_tree: bool = false) -> void:
+	_reset_box_selection()
 	_cancel_drag()
 	_clear_frames(false)
 	_restore_all_hidden(false)
@@ -906,6 +967,10 @@ func _reset_projection() -> void:
 	_planned_wires.clear()
 	_suppressed.clear()
 	_index.clear()
+	if preserve_tree:
+		return
+	_stop_watching_tree()
+	_clear_members_target()
 	_selected_group_ids.clear()
 	_editing_group_id = ""
 	_blend_tree = null
@@ -1354,12 +1419,93 @@ func _adopt(tree: AnimationNodeBlendTree, key: String) -> void:
 	if tree == _blend_tree and path == _sidecar_path and tree_key == _tree_key and _data != null:
 		return
 	# A different tree on screen means the picked ids name nothing here.
+	_stop_watching_tree()
+	_reset_box_selection()
+	_clear_members_target()
 	_selected_group_ids.clear()
 	_editing_group_id = ""
 	_blend_tree = tree
 	_sidecar_path = path
 	_tree_key = tree_key
 	_data = _load_data(path)
+
+
+## Only one explicit group is an unambiguous destination for new nodes.
+## Capture membership synchronously, before the editor rebuilds its graph and
+## selects the created node. Loading a tree establishes a baseline, never adds
+## its pre-existing nodes to a picked group.
+func _watch_blend_tree() -> void:
+	if _watched_tree == _blend_tree:
+		return
+	_stop_watching_tree()
+	_watched_tree = _blend_tree
+	_known_nodes = _node_snapshot(_watched_tree)
+	_watched_tree.tree_changed.connect(_on_tree_structure_changed)
+
+
+func _stop_watching_tree() -> void:
+	if is_instance_valid(_watched_tree) \
+			and _watched_tree.tree_changed.is_connected(_on_tree_structure_changed):
+		_watched_tree.tree_changed.disconnect(_on_tree_structure_changed)
+	_watched_tree = null
+	_known_nodes.clear()
+	_auto_memberships.clear()
+	_pending_group_id = ""
+	_pending_group_retries = 0
+
+
+func _node_snapshot(tree: AnimationNodeBlendTree) -> Dictionary:
+	var snapshot := {}
+	if tree != null:
+		for node_name in tree.get_node_list():
+			snapshot[String(node_name)] = tree.get_node(node_name).get_instance_id()
+	return snapshot
+
+
+func _on_tree_structure_changed() -> void:
+	if _editor_suspended or _data == null or _watched_tree != _blend_tree:
+		return
+	var current := _node_snapshot(_watched_tree)
+	var removed_ids := {}
+	var changed := false
+	for node_name in _known_nodes:
+		if current.has(node_name):
+			continue
+		removed_ids[_known_nodes[node_name]] = true
+		# Remember an auto-added node's latest owner for undo/redo. Weak refs
+		# avoid retaining deleted animation resources just for this bookkeeping.
+		if _auto_memberships.has(node_name):
+			var owner := _data.group_containing(_tree_key, node_name)
+			if owner != null:
+				_auto_memberships[node_name]["group_id"] = owner.id
+				changed = owner.remove_member(node_name) or changed
+			else:
+				_auto_memberships.erase(node_name)
+	var picked := _selected_groups()
+	var target: BlendTreeGroup = picked[0] if picked.size() == 1 else null
+	for node_name in current:
+		if node_name == OUTPUT_NODE or _known_nodes.has(node_name) \
+				or removed_ids.has(current[node_name]):
+			continue
+		var node := _watched_tree.get_node(StringName(node_name))
+		var destination := target
+		var remembered: Dictionary = _auto_memberships.get(node_name, {})
+		if not remembered.is_empty() and remembered["node"].get_ref() == node:
+			destination = _data.group_with_id(remembered["group_id"])
+		if destination == null or destination.tree_key != _tree_key \
+				or _sidecar_path.is_empty() or _data.group_containing(_tree_key, node_name) != null:
+			continue
+		destination.members.append(node_name)
+		_auto_memberships[node_name] = {"node": weakref(node), "group_id": destination.id}
+		if target == destination:
+			_pending_group_id = target.id
+			_pending_group_retries = 2
+		changed = true
+	_known_nodes = current
+	if changed:
+		# Save this sidecar before navigation can adopt a different tree.
+		_save()
+	_queue_apply()
 
 
 ## The file a nested tree's sidecar hangs off, and the key prefix it needs.
@@ -1406,7 +1552,7 @@ func _load_data(path: String) -> BlendTreeGroupData:
 ## Save on the next idle frame.
 ##
 ## The chevron is a click target people drum on, and every save is a
-## ResourceSaver.save plus a filesystem rescan. The five toolbar commands call
+## ResourceSaver.save plus a filesystem rescan. The toolbar commands call
 ## _save() directly; they cannot be spammed the same way.
 func _queue_save() -> void:
 	if _save_queued:
@@ -1448,6 +1594,8 @@ func _on_command(id: StringName) -> void:
 			_ungroup_selection()
 		&"edit":
 			_edit_selection()
+		&"members":
+			_edit_members()
 		&"tidy":
 			_tidy_selection()
 
@@ -1492,6 +1640,7 @@ func _group_selection() -> void:
 ## Sword B leaves both inside Sword; a selection spanning different parents has
 ## no shared home, and the wrapper goes to the top level.
 func _wrap_groups(picked: Array[BlendTreeGroup]) -> void:
+	picked = _group_selection_roots(picked)
 	var index := _data.build_index(_tree_key)
 
 	# Wrapping pushes the whole subtree down a level, so the group that decides
@@ -1586,6 +1735,57 @@ func _on_edit_applied(title: String, tint: Color) -> void:
 	group.tint = tint
 	_save()
 	_queue_apply()
+
+
+func _edit_members() -> void:
+	var group := _single_group()
+	if group == null:
+		return
+	_members_group_id = group.id
+	_members_tree = _blend_tree
+	_members_data = _data
+	var nested := PackedStringArray()
+	for child in _data.descendants_of(group):
+		nested.append_array(child.members)
+	var entries: Array[Dictionary] = []
+	var names := _blend_tree.get_node_list()
+	names.sort()
+	for node_name in names:
+		if node_name == OUTPUT_NODE:
+			continue
+		var node := _blend_tree.get_node(StringName(node_name))
+		var owner := _data.group_containing(_tree_key, node_name)
+		entries.append({
+			"name": String(node_name),
+			"detail": String(node.animation) if node is AnimationNodeAnimation else node.get_class(),
+			"owner": owner.title if owner != null else "Ungrouped",
+			"nested": nested.has(node_name),
+		})
+	_members_dialog.popup(group.title, entries, group.members)
+
+
+func _on_members_applied(members: PackedStringArray) -> void:
+	# A modal dialog must never apply to a different graph after navigation.
+	if _members_tree != _blend_tree or _members_data != _data or _data == null:
+		_clear_members_target()
+		return
+	var group := _data.group_with_id(_members_group_id)
+	_clear_members_target()
+	if group == null or group.tree_key != _tree_key:
+		return
+	var valid := PackedStringArray()
+	for member in members:
+		if member != OUTPUT_NODE and _blend_tree.has_node(StringName(member)):
+			valid.append(member)
+	if _data.set_members(group, valid):
+		_save()
+		_queue_apply(true)
+
+
+func _clear_members_target() -> void:
+	_members_group_id = ""
+	_members_tree = null
+	_members_data = null
 
 
 ## Lay a group's members out where they already are, only in order.
@@ -1733,8 +1933,114 @@ func _selected_groups() -> Array[BlendTreeGroup]:
 	return found
 
 
+## A selected ancestor already includes its descendants. Use each subtree once.
+func _group_selection_roots(picked: Array[BlendTreeGroup]) -> Array[BlendTreeGroup]:
+	var roots: Array[BlendTreeGroup] = []
+	for group in picked:
+		var covered := false
+		for ancestor in _data.ancestors_of(group):
+			if picked.has(ancestor):
+				covered = true
+				break
+		if not covered:
+			roots.append(group)
+	return roots
+
+
 func _is_selected(group: BlendTreeGroup) -> bool:
 	return group != null and _selected_group_ids.has(group.id)
+
+
+## Observe the same blank-canvas gesture as native node box selection. The
+## native rectangle still draws; crossing a group title selects the group,
+## while a rectangle restricted to its interior still selects ordinary nodes.
+## Never accept these events: GraphEdit needs them to end its own gesture.
+func _on_graph_input(event: InputEvent) -> void:
+	if _dragging or _data == null or _blend_tree == null or _sidecar_path.is_empty():
+		return
+	var button := event as InputEventMouseButton
+	if button != null:
+		if button.button_index == MOUSE_BUTTON_RIGHT and button.pressed and _box_active:
+			_finish_box_selection.call_deferred(_box_serial, true)
+		elif button.button_index == MOUSE_BUTTON_LEFT:
+			if button.pressed:
+				_reset_box_selection()
+				# Node drags, port connections, and Space-panning are not marquees.
+				if Input.is_key_pressed(KEY_SPACE):
+					return
+				for child in _graph.get_children():
+					if child is GraphNode and child.visible \
+							and child.get_rect().grow(12.0 * _graph.zoom).has_point(button.position):
+						return
+				_box_active = true
+				_box_origin = button.position
+				_box_to = button.position
+				_box_additive = button.ctrl_pressed or button.meta_pressed or button.shift_pressed
+				_box_previous = _selected_group_ids.duplicate()
+				if not _box_additive:
+					_clear_group_selection()
+			else:
+				_box_to = button.position
+				_finish_box_selection.call_deferred(_box_serial, false)
+		return
+	var motion := event as InputEventMouseMotion
+	if motion != null and _box_active:
+		_box_to = motion.position
+		# Run after GraphEdit has selected its nodes, so a group hit can take
+		# precedence without racing native node_selected signals.
+		_update_box_selection.call_deferred(_box_serial)
+		if (motion.button_mask & MOUSE_BUTTON_MASK_LEFT) == 0:
+			_finish_box_selection.call_deferred(_box_serial, false)
+
+
+func _update_box_selection(serial: int) -> void:
+	if not _box_active or serial != _box_serial or not is_instance_valid(_graph) or _data == null:
+		return
+	var picked := _box_previous.duplicate() if _box_additive else PackedStringArray()
+	if LAYOUT.is_drag(_box_origin, _box_to, DRAG_THRESHOLD):
+		var rect := Rect2(_box_origin, _box_to - _box_origin).abs()
+		for group in _data.groups_for(_tree_key):
+			var frame := _graph.get_node_or_null(NodePath(FRAME_PREFIX + group.id)) as GraphFrame
+			if frame == null or not frame.visible:
+				continue
+			var bar := _titlebar_of(group.id)
+			if bar == null:
+				continue
+			# Transform both corners, accounting for pan, zoom and editor scale.
+			var transform := _graph.get_global_transform().affine_inverse() * bar.get_global_transform()
+			var start: Vector2 = transform * Vector2.ZERO
+			var end: Vector2 = transform * bar.size
+			var hit := Rect2(start, end - start).abs()
+			if group.collapsed:
+				hit = Rect2(frame.position, frame.size * _graph.zoom)
+			if rect.intersects(hit) and not picked.has(group.id):
+				picked.append(group.id)
+	if picked != _selected_group_ids:
+		_selected_group_ids = picked
+		_queue_apply()
+	if not picked.is_empty():
+		_deselect_nodes()
+	_update_buttons()
+
+
+func _finish_box_selection(serial: int, cancelled: bool) -> void:
+	if not _box_active or serial != _box_serial:
+		return
+	if cancelled:
+		_selected_group_ids = _box_previous.duplicate()
+		if not _selected_group_ids.is_empty():
+			_deselect_nodes()
+		_queue_apply()
+	else:
+		_update_box_selection(serial)
+	_reset_box_selection()
+	_update_buttons()
+
+
+func _reset_box_selection() -> void:
+	_box_active = false
+	_box_previous.clear()
+	_box_serial += 1
 
 #endregion
 
@@ -1878,6 +2184,7 @@ func _update_buttons() -> void:
 	_toolbar.set_enabled(&"group", can_group and not too_deep, group_tip)
 	_toolbar.set_enabled(&"ungroup", has_target and not groups.is_empty(), tip)
 	_toolbar.set_enabled(&"edit", single, tip)
+	_toolbar.set_enabled(&"members", single, tip)
 	_toolbar.set_enabled(&"tidy", single, tip)
 
 #endregion
@@ -1903,7 +2210,7 @@ func _on_titlebar_input(event: InputEvent, group_id: String) -> void:
 			# Read the modifiers at press time: the release event that decides a
 			# click has its own, and a user who lets go of Ctrl first would
 			# otherwise have their multi-select turn into a plain one.
-			_drag_additive = press.ctrl_pressed or press.shift_pressed
+			_drag_additive = press.ctrl_pressed or press.meta_pressed or press.shift_pressed
 			if _begin_drag(group_id, press.global_position):
 				bar.accept_event()
 		elif _dragging:
@@ -1976,24 +2283,28 @@ func _begin_drag(group_id: String, global_point: Vector2) -> bool:
 	_drag_box_offsets.clear()
 	_drag_box_positions.clear()
 
-	# The whole subtree: a group holds its nested groups' nodes as surely as its
-	# own, and a member hidden inside a collapsed child moves with everything
-	# else so expanding it later shows the group where it was put.
-	for member in _data.subtree_members(group):
-		if not _blend_tree.has_node(StringName(member)):
-			continue
-		_drag_member_positions[member] = _blend_tree.get_node_position(StringName(member))
-		var node := _graph.get_node_or_null(NodePath(member)) as GraphNode
-		if node != null:
-			_drag_member_offsets[member] = node.position_offset
-
-	for inside in _data.subtree_of(group):
-		if not inside.collapsed:
-			continue
-		_drag_box_positions[inside.id] = inside.collapsed_position
-		var box := _graph.get_node_or_null(NodePath(FRAME_PREFIX + inside.id)) as GraphFrame
-		if box != null:
-			_drag_box_offsets[inside.id] = box.position_offset
+	# Dragging any picked group carries the selection. An unpicked title starts
+	# a new selection, or joins the current one when a modifier is held.
+	var moving := _selected_groups()
+	if not moving.has(group):
+		if not _drag_additive:
+			moving.clear()
+		moving.append(group)
+	for root in _group_selection_roots(moving):
+		for member in _data.subtree_members(root):
+			if not _blend_tree.has_node(StringName(member)):
+				continue
+			_drag_member_positions[member] = _blend_tree.get_node_position(StringName(member))
+			var node := _graph.get_node_or_null(NodePath(member)) as GraphNode
+			if node != null:
+				_drag_member_offsets[member] = node.position_offset
+		for inside in _data.subtree_of(root):
+			if not inside.collapsed:
+				continue
+			_drag_box_positions[inside.id] = inside.collapsed_position
+			var box := _graph.get_node_or_null(NodePath(FRAME_PREFIX + inside.id)) as GraphFrame
+			if box != null:
+				_drag_box_offsets[inside.id] = box.position_offset
 
 	_dragging = true
 	return true
@@ -2005,6 +2316,14 @@ func _drive_drag(global_point: Vector2) -> void:
 	var local := _graph_local_of(global_point)
 	if not _drag_moved and LAYOUT.is_drag(_drag_press_local, local, DRAG_THRESHOLD):
 		_drag_moved = true
+		if not _selected_group_ids.has(_drag_group_id):
+			if not _drag_additive:
+				_selected_group_ids.clear()
+			_selected_group_ids.append(_drag_group_id)
+		_deselect_nodes()
+		_queue_apply()
+	if not _drag_moved:
+		return
 
 	var raw := _graph_offset_of(global_point) - _drag_origin
 	var delta := LAYOUT.snapped_delta(raw, _graph.snapping_enabled,
@@ -2074,7 +2393,8 @@ func _finish_drag() -> void:
 		# way to reach a collapsed group: its members are hidden, so there is
 		# nothing for the node based selection to get hold of.
 		_restore_drag()
-		_select_group(_drag_group_id, _drag_additive)
+		if not _drag_moved:
+			_select_group(_drag_group_id, _drag_additive)
 	_end_drag()
 
 
